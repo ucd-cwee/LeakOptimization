@@ -1,0 +1,186 @@
+global& opt_file_sum = "${getDataFolder()}//Summer_Opt.inp";  
+global& control_file_sum = "${getDataFolder()}//Summer_Control.inp";  
+
+global& opt_file_win = "${getDataFolder()}//Winter_Opt.inp";  
+global& control_file_win = "${getDataFolder()}//Winter_Control.inp";  
+
+
+
+
+
+
+
+
+Stopwatch sw; sw.Start;
+var& createMapLeakModelResults = fun[](cweeStr filePath, cweeStr controlPath){
+                       // Get EPAnet Projects and simulate them
+                       var& p = EPAnet.loadProject(filePath);{ p.DoHydraulicSimulation; }
+                       var& p2 = EPAnet.loadProject(controlPath);{ p2.DoHydraulicSimulation; }
+                       var& findControlNode = fun[p2](nodeName){ for (n : p2.network.Node){ if (n && n.Name_p == nodeName){ return n; } } };
+                       // Get Zones from Optimized Model
+                       Map zones; {
+                                               for (z : p.network.Zone){ if (z){
+                                                                       zones[z.to_string()] := Szone(z); // copies a ptr to the zone "z"
+                                               } }
+                                               try{ // 'try' to ensure we don't crash if these zones don't exist
+                                                                       // called out by-hand as zone(s) we don't want to publish on
+                                                                       zones.erase("DMA Draw Zone (Reservoir SystemConnection)");
+                                                                       zones.erase("DMA Reduced Zone (Pipe TimeOfUse_6pm_To_7pm)");
+                                               }
+                       }
+                       // Get Content
+                       Map out;
+                       for (z : zones){
+                                               var& zone := z.second;
+                                               var& control_zone = findControlNode(zone.Node[0].Name_p).Zone;
+                                               var& prevPressure = control_zone.AverageNodePressure; // previous pressure from control project
+                                               year surveyF = zone.SurveyFrequency(p, prevPressure); // survey frequency, in years
+                                               out[z.first] := zone.LeakModelResults(p, surveyF, prevPressure);
+                                               out[z.first]["Survey Frequency"] := surveyF;
+                       }
+                       return out;
+}
+var& result = createMapLeakModelResults(opt_file_sum, control_file_sum);
+var& p = EPAnet.loadProject(opt_file);{ p.DoHydraulicSimulation; }
+var& minT = p.project.times.GetCalibrationDateTime.cweeTime.double.second;
+var& maxT = (p.project.times.GetCalibrationDateTime + p.project.times.Dur).cweeTime.double.second;
+cweeStr out = "ZONE,ITEM,TIME,VALUE";
+for (x : result){
+	for (y : x.second){
+		try{
+			var& knots = y.second.GetTimeSeries(minT, maxT, 1_hr);
+			int num = knots.size.int;
+			for (int j = 0; j < num; ++j){
+				out.AddToDelimiter("${x.first},${y.first},${knots[j].first.cweeTime},${ knots[j].second }", "\n");
+			}
+		}catch(err){ // we will ignore the error … this is likely not a pattern type.
+			out.AddToDelimiter("${x.first},${y.first},N/A,${y.second}", "\n");	
+		}
+	}
+}
+"${getDataFolder()}//LeakModelResults2_Summer.csv".writeFileFromCweeStr(out);
+sw.Stop; submitToast("Script 1", "${sw.Seconds_Passed}");
+return sw.Seconds_Passed;
+
+
+
+
+
+
+Stopwatch sw; sw.Start; 
+// Make the helper function(s)
+var& GetNodePressures = fun[](cweeStr filePath, bool onlyCustomers){
+	// Get EPAnet Projects and simulate them
+	var& p = EPAnet.loadProject(filePath);{ p.DoHydraulicSimulation; }
+	Map out;
+	for (zone : p.network.Zone){
+		out[zone.Name_p] ?= Map();
+		for (n : zone.Node){
+			if (onlyCustomers){ if (!n.HasWaterDemand){ continue; } }
+ 			out[zone.Name_p][n.Name_p] := (n.Head - n.El).Cast(1_ft_water).Cast(1_psi);
+		}
+	}
+	return [p, out]; 
+} 
+var& convertToCSV = fun[](content, cweeStr savePath){
+	cweevector_cweeStr out;
+	out.push_back(cweeStr("ZONE,NODE,TIME,UNIXTIME,VALUE"));
+	var& p = content[0];
+	var& minT = p.project.times.GetCalibrationDateTime.cweeTime.double.second;
+	var& maxT = (p.project.times.GetCalibrationDateTime + p.project.times.Dur).cweeTime.double.second;
+	cweeStr delim = "\n";
+	cweeStr row_p2;
+	int num;
+	for (zone_pair : content[1]){
+		for (node_pair : zone_pair.second){
+			cweeStr row = "${zone_pair.first},${node_pair.first},";			
+			var& knots = node_pair.second.GetTimeSeries(minT, maxT, 1_hr);
+			num = knots.size.int; 
+			var& knot;
+			for (var& index = 0; index < num; ++index){				
+				knot := knots[index];
+				row_p2 = knot.first.cweeTime.to_string + "," + knot.first.to_string + "," + knot.second.to_string;
+				out.push_back(row + row_p2);
+			}
+		} 
+	}	
+	savePath.writeFileFromStrList(out);
+	return out;
+};
+// Call the helper function on our EPAnet file
+var& node_pressures_opt_sum = GetNodePressures(opt_file_sum, false);
+var& customer_pressures_opt_sum = GetNodePressures(opt_file_sum, true);
+
+var& node_pressures_con_sum = GetNodePressures(control_file_sum, false);
+var& customer_pressures_con_sum = GetNodePressures(control_file_sum, true);
+
+var& node_pressures_opt_win = GetNodePressures(opt_file_win, false);
+var& customer_pressures_opt_win = GetNodePressures(opt_file_win, true);
+
+var& node_pressures_con_win = GetNodePressures(control_file_win, false);
+var& customer_pressures_con_win = GetNodePressures(control_file_win, true);
+
+
+// Convert to CSV
+convertToCSV(node_pressures_opt_sum, "${getDataFolder()}//NodePressure_Summer_Opt.csv");
+convertToCSV(customer_pressures_opt_sum, "${getDataFolder()}//CustomerPressure_Summer_Opt.csv");
+
+convertToCSV(node_pressures_con_sum, "${getDataFolder()}//NodePressure_Summer_Con.csv");
+convertToCSV(customer_pressures_con_sum, "${getDataFolder()}//CustomerPressure_Summer_Con.csv");
+
+convertToCSV(node_pressures_opt_win, "${getDataFolder()}//NodePressure_Winter_Opt.csv");
+convertToCSV(customer_pressures_opt_win, "${getDataFolder()}//CustomerPressure_Winter_Opt.csv");
+
+convertToCSV(node_pressures_con_win, "${getDataFolder()}//NodePressure_Winter_Con.csv");
+convertToCSV(customer_pressures_con_win, "${getDataFolder()}//CustomerPressure_Winter_Con.csv");
+
+sw.Stop; submitToast("Script2", "${sw.Seconds_Passed}"); 
+return sw.Seconds_Passed; 
+
+
+
+
+
+
+
+
+
+
+
+Stopwatch sw; sw.Start; 
+// Make the helper function(s)
+var& LoadEPAnetProject = fun[](cweeStr filePath){ 
+	var& p = EPAnet.loadProject(filePath); 
+	p.DoHydraulicSimulation; 
+	return p; 
+};
+var& FindMatchingZone = fun[](p, node_name){
+	for (n : p.network.Node){
+           	if (n && n.Name_p == node_name){
+                                	return n.Zone;
+		}
+	}
+};
+// Load the EPAnet Projects
+var& opt = LoadEPAnetProject(opt_file_sum);
+var& control = LoadEPAnetProject(control_file_sum);
+// Make the CSV
+cweeStr out = "Node,ControlZone,OptZone";
+for (zone : opt.network.Zone){         
+	for (n : zone.Node){
+           	if (n){
+                      	var& control_zone = FindMatchingZone(control, n.Name_p);
+                                 out.AddToDelimiter("${n.Name_p},${control_zone.Name_p},${zone.Name_p}", "\n");
+		}
+	}
+}
+// Save the CSV
+"${getDataFolder()}//NodeToZones_sum.csv".writeFileFromCweeStr(out);
+sw.Stop; submitToast("Script3", "${sw.Seconds_Passed}"); 
+return sw.Seconds_Passed; 
+
+
+
+
+
+
