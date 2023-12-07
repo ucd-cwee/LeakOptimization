@@ -1,0 +1,30 @@
+var& fp = "${getDataFolder()}\\Final_Summer_Control.inp" // filepath
+var& p = EPAnet.loadProject(fp); // load the EPAnet project
+p.DoHydraulicSimulation(); // create the initial (control) simulation results
+var& perf;
+int numV = 4; // number of valves to try and site at once (will try more combinations)
+while (true) {
+	try{
+		var& opt = p.Optimize(
+			numV, /* num valves */
+			"Genetic", /* method ==> "PSO", "Genetic", or "Random" */
+			120 /* num particles or policies per iterations */
+		);
+		if (opt.contains("Project") && opt["Project"]){
+			perf ?= opt["Performance"];
+			if (perf <= opt["Performance"]){ // better performance?
+				p = opt["Project"]; // set the project to this optimized version.
+				perf = opt["Performance"]; // capture the performance.
+			} else if (numV <= 4 && numV > 1){ // worse performance but room to try again?
+				numV--; // try to site one less number of valves simultaneously
+			} else{ // worse performance and no room left to try again?
+				break; // break loop
+			}
+		}else{
+			break // something went wrong in the optimization -> break loop. 
+		}
+	}catch(e){ // capture an error, which can come from anywhere. 
+		return e.what(); // return the error.
+	}
+}
+return p; // return the final, optimized EPAnet project.
